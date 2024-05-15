@@ -1,0 +1,116 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.layers import AveragePooling2D, Dropout, Flatten, Dense, Input
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+from tensorflow.keras.utils import to_categorical
+from sklearn.preprocessing import LabelBinarizer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+import cv2
+import os
+
+dataset_dir = 'dataset'
+
+# Initialize lists for data and labels
+data = []
+labels = []
+
+# Loop through each class directory
+for root, dirs, files in os.walk(dataset_dir):
+    for file in files:
+        if file.endswith('.png'):
+            # Load image and resize to 224x224 (input size for MobileNetV2)
+            image_path = os.path.join(root, file)
+            image = cv2.imread(image_path)
+            image = cv2.resize(image, (224, 224))
+
+            # Preprocess the image
+            image = preprocess_input(image)
+
+            # Extract label from directory name
+            label = root.split(os.path.sep)[-1]
+
+            # Append image and label to data lists
+            data.append(image)
+            labels.append(label)
+
+# Convert data and labels to numpy arrays
+data = np.array(data, dtype='float32')
+labels = np.array(labels)
+
+# Perform one-hot encoding on the labels
+lb = LabelBinarizer()
+labels = lb.fit_transform(labels)
+labels = to_categorical(labels)
+
+# Split the data into training and testing sets
+(trainX, testX, trainY, testY) = train_test_split(data, labels, test_size=0.2, random_state=42)
+
+# Data augmentation
+augmentation = ImageDataGenerator(
+    rotation_range=20,
+    zoom_range=0.15,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    shear_range=0.15,
+    horizontal_flip=True,
+    fill_mode="nearest"
+)
+
+# Load the MobileNetV2 model (pre-trained on ImageNet)
+baseModel = MobileNetV2(weights="imagenet", include_top=False, input_tensor=Input(shape=(224, 224, 3)))
+
+# Construct the head of the model that will be placed on top of the base model
+headModel = baseModel.output
+headModel = AveragePooling2D(pool_size=(7, 7))(headModel)
+headModel = Flatten(name="flatten")(headModel)
+headModel = Dense(128, activation="relu")(headModel)
+headModel = Dropout(0.5)(headModel)
+headModel = Dense(len(lb.classes_), activation="softmax")(headModel)
+
+# Place the head FC model on top of the base model (this will become the actual model we will train)
+model = Model(inputs=baseModel.input, outputs=headModel)
+
+# Freeze the layers of the base model (so they are not updated during training)
+for layer in baseModel.layers:
+    layer.trainable = False
+
+# Compile the model
+opt = Adam(lr=1e-4, decay=1e-4 / 20)
+model.compile(loss="categorical_crossentropy", optimizer=opt, metrics=["accuracy"])
+
+# Train the model
+batch_size = 32
+epochs = 20
+history = model.fit(
+    augmentation.flow(trainX, trainY, batch_size=batch_size),
+    steps_per_epoch=len(trainX) // batch_size,
+    validation_data=(testX, testY),
+    validation_steps=len(testX) // batch_size,
+    epochs=epochs
+)
+
+# Make predictions on the test set
+predictions = model.predict(testX, batch_size=batch_size)
+
+# Find the index of the label with the largest predicted probability for each image
+predictions = np.argmax(predictions, axis=1)
+
+# Generate a classification report
+print(classification_report(testY.argmax(axis=1), predictions, target_names=lb.classes_))
+
+# Plot training history
+plt.figure(figsize=(10, 5))
+plt.plot(np.arange(0, epochs), history.history["loss"], label="train_loss")
+plt.plot(np.arange(0, epochs), history.history["val_loss"], label="val_loss")
+plt.plot(np.arange(0, epochs), history.history["accuracy"], label="train_accuracy")
+plt.plot(np.arange(0, epochs), history.history["val_accuracy"], label="val_accuracy")
+plt.title("Training Loss and Accuracy")
+plt.xlabel("Epoch")
+plt.ylabel("Loss/Accuracy")
+plt.legend(loc="lower left")
+plt.show()
